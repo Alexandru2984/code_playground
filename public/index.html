@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Code Playground</title>
+    <style>
+        :root {
+            --bg-dark: #0d1117;
+            --bg-panel: #161b22;
+            --text-main: #c9d1d9;
+            --border-color: #30363d;
+            --accent: #2f81f7;
+            --accent-hover: #1f6feb;
+            --danger: #f85149;
+            --success: #2ea043;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .navbar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 24px;
+            background-color: var(--bg-panel);
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .navbar h1 {
+            font-size: 1.2rem;
+            margin: 0;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: white;
+        }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        select {
+            padding: 8px 12px;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        select:focus {
+            border-color: var(--accent);
+        }
+
+        button {
+            background-color: var(--success);
+            color: white;
+            border: 1px solid rgba(240, 246, 252, 0.1);
+            padding: 8px 20px;
+            font-size: 14px;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        button:hover:not(:disabled) {
+            background-color: #2c974b;
+        }
+
+        button:disabled {
+            background-color: var(--border-color);
+            color: #8b949e;
+            cursor: not-allowed;
+            border-color: transparent;
+        }
+
+        .workspace {
+            display: flex;
+            flex: 1;
+            height: calc(100vh - 60px);
+        }
+
+        .editor-pane, .output-pane {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            width: 50%;
+        }
+
+        .editor-pane {
+            border-right: 1px solid var(--border-color);
+        }
+
+        .pane-header {
+            padding: 8px 16px;
+            background-color: var(--bg-panel);
+            border-bottom: 1px solid var(--border-color);
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b949e;
+        }
+
+        #editor-container {
+            flex: 1;
+            width: 100%;
+            height: 100%;
+        }
+
+        #output {
+            flex: 1;
+            padding: 16px;
+            margin: 0;
+            background-color: var(--bg-dark);
+            color: #a5d6ff;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            border: none;
+            outline: none;
+        }
+
+        .error-text { color: var(--danger) !important; }
+        .sys-text { color: #8b949e; }
+        
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+        .animate-spin { animation: spin 1s linear infinite; }
+    </style>
+</head>
+<body>
+    <div class="navbar">
+        <h1>
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+            Code Playground
+        </h1>
+        <div class="controls">
+            <select id="language" onchange="changeLanguage()">
+                <option value="python">Python</option>
+                <option value="javascript">JavaScript</option>
+                <option value="c">C</option>
+            </select>
+            <button id="runBtn" onclick="runCode()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                Run Code
+            </button>
+        </div>
+    </div>
+
+    <div class="workspace">
+        <div class="editor-pane">
+            <div class="pane-header">Editor</div>
+            <div id="editor-container"></div>
+        </div>
+        <div class="output-pane">
+            <div class="pane-header">Terminal Output</div>
+            <pre id="output"><span class="sys-text">Ready. Select a language and write your code.</span></pre>
+        </div>
+    </div>
+
+    <!-- Monaco Editor via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs/loader.min.js"></script>
+    <script>
+        const defaultSnippets = {
+            python: 'def greet(name):\n    print(f"Hello, {name}! Welcome to the secure sandbox.")\n\n# Indentation now works perfectly!\ngreet("Developer")',
+            javascript: 'function greet(name) {\n    console.log(`Hello, ${name}! Welcome to the secure sandbox.`);\n}\n\n// Syntax errors will be highlighted live.\ngreet("Developer");',
+            c: '#include <stdio.h>\n\nint main() {\n    printf("Hello, Developer! Welcome to the secure sandbox.\\n");\n    return 0;\n}'
+        };
+
+        require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' } });
+        
+        let editor;
+        require(['vs/editor/editor.main'], function() {
+            editor = monaco.editor.create(document.getElementById('editor-container'), {
+                value: defaultSnippets.python,
+                language: 'python',
+                theme: 'vs-dark',
+                automaticLayout: true,
+                fontSize: 14,
+                fontFamily: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                roundedSelection: false,
+                padding: { top: 16 },
+                tabSize: 4,
+                insertSpaces: true
+            });
+        });
+
+        function changeLanguage() {
+            if (!editor) return;
+            const lang = document.getElementById('language').value;
+            const monacoLang = lang === 'c' ? 'c' : lang;
+            
+            monaco.editor.setModelLanguage(editor.getModel(), monacoLang);
+            editor.setValue(defaultSnippets[lang]);
+        }
+
+        async function runCode() {
+            if (!editor) return;
+            
+            const code = editor.getValue();
+            const language = document.getElementById('language').value;
+            const outputEl = document.getElementById('output');
+            const runBtn = document.getElementById('runBtn');
+
+            outputEl.innerHTML = '<span class="sys-text">Executing in sandbox...</span>\n';
+            runBtn.disabled = true;
+            runBtn.innerHTML = '<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="2" x2="12" y2="6"></line><line x1="12" y1="18" x2="12" y2="22"></line><line x1="4.93" y1="4.93" x2="7.76" y2="7.76"></line><line x1="16.24" y1="16.24" x2="19.07" y2="19.07"></line><line x1="2" y1="12" x2="6" y2="12"></line><line x1="18" y1="12" x2="22" y2="12"></line><line x1="4.93" y1="19.07" x2="7.76" y2="16.24"></line><line x1="16.24" y1="7.76" x2="19.07" y2="4.93"></line></svg> Running';
+
+            try {
+                const response = await fetch('/run', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ code, language })
+                });
+
+                const result = await response.json();
+                
+                if (response.ok) {
+                    if (result.error) {
+                        outputEl.innerHTML = `<span class="error-text">${escapeHtml(result.output || "")}</span>\n<span class="error-text">[System] ${escapeHtml(result.error)}</span>`;
+                    } else if (result.exitCode !== 0) {
+                        outputEl.innerHTML = `<span class="error-text">${escapeHtml(result.output || "Error occurred.")}</span>`;
+                    } else {
+                        outputEl.innerHTML = `<span>${escapeHtml(result.output || "No output.")}</span>`;
+                    }
+                } else {
+                    outputEl.innerHTML = `<span class="error-text">Server error: ${escapeHtml(result.message || response.statusText)}</span>`;
+                }
+            } catch (err) {
+                outputEl.innerHTML = `<span class="error-text">Network error: ${escapeHtml(err.message)}</span>`;
+            } finally {
+                runBtn.disabled = false;
+                runBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg> Run Code';
+            }
+        }
+
+        function escapeHtml(unsafe) {
+            return unsafe
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+    </script>
+</body>
+</html>

@@ -11,3 +11,5 @@ bin           = @["nimplayground"]
 
 requires "nim >= 2.2.10"
 requires "prologue >= 0.6.4"
+requires "db_connector"
+requires "websocketx"

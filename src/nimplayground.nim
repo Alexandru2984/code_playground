@@ -31,16 +31,15 @@ proc runCode(ctx: Context) {.async.} =
     if language == "python":
       tmpFile = execDir / "snippet.py"
       writeFile(tmpFile, code)
-      cmd = "timeout 5s docker run --rm -v " & execDir & ":/app:ro --memory=\"64m\" --cpus=\"0.5\" --network none --pids-limit 64 python:3.9-alpine python /app/snippet.py"
+      cmd = "timeout 5s sh -c 'docker run --rm -i --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges -v " & execDir & ":/app:ro --memory=\"64m\" --cpus=\"0.5\" --network none --pids-limit 64 python:3.9-alpine python /app/snippet.py 2>&1 | head -c 65536'"
     elif language == "javascript":
       tmpFile = execDir / "snippet.js"
       writeFile(tmpFile, code)
-      cmd = "timeout 5s docker run --rm -v " & execDir & ":/app:ro --memory=\"64m\" --cpus=\"0.5\" --network none --pids-limit 64 node:18-alpine node /app/snippet.js"
+      cmd = "timeout 5s sh -c 'docker run --rm -i --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges -v " & execDir & ":/app:ro --memory=\"64m\" --cpus=\"0.5\" --network none --pids-limit 64 node:18-alpine node /app/snippet.js 2>&1 | head -c 65536'"
     elif language == "c":
       tmpFile = execDir / "snippet.c"
       writeFile(tmpFile, code)
-      # For C, mount read-write so GCC can output the binary, then execute it
-      cmd = "timeout 5s docker run --rm -v " & execDir & ":/app:rw --memory=\"128m\" --cpus=\"1.0\" --network none --pids-limit 64 gcc:11 sh -c \"cd /app && gcc snippet.c -o prog && ./prog\""
+      cmd = "timeout 5s sh -c 'docker run --rm -i --user 65534:65534 --cap-drop ALL --security-opt no-new-privileges -v " & execDir & ":/app:ro --tmpfs /tmp:rw,exec,size=50m --memory=\"128m\" --cpus=\"1.0\" --network none --pids-limit 64 gcc:11 sh -c \"cd /tmp && cp /app/snippet.c . && gcc snippet.c -o prog && ./prog\" 2>&1 | head -c 65536'"
 
     let (output, exitCode) = execCmdEx(cmd)
 

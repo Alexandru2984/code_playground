@@ -1,0 +1,4 @@
+FROM python:3.13-slim
+
+# Install pre-compiled data science wheels to save CPU time during build
+RUN pip install --no-cache-dir numpy pandas requests matplotlib

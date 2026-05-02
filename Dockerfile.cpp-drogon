@@ -1,0 +1,5 @@
+FROM drogonframework/drogon@sha256:5b518f6c44a7dcf545992fd486fb67b1f03303ce41c56e7fa0398e14c5cdeb29
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends g++ libjsoncpp-dev uuid-dev libsqlite3-dev libmariadb-dev \
+    && rm -rf /var/lib/apt/lists/*

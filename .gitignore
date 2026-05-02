@@ -1,5 +1,7 @@
 /bin/
 /nimcache/
+/sandbox/
+/data/
 *.exe
 *.o
 *.so

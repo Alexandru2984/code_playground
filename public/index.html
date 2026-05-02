@@ -20,9 +20,15 @@
 
         * { box-sizing: border-box; }
 
+        html {
+            min-height: 100%;
+        }
+
         body {
             margin: 0;
             min-height: 100vh;
+            min-height: 100svh;
+            overflow-x: hidden;
             color: var(--text);
             font-family: "Avenir Next", "Trebuchet MS", Verdana, sans-serif;
             background:
@@ -35,6 +41,7 @@
             display: grid;
             grid-template-rows: auto 1fr;
             min-height: 100vh;
+            min-height: 100svh;
         }
 
         .navbar {
@@ -70,6 +77,7 @@
 
         select,
         button {
+            max-width: 100%;
             border: 1px solid var(--border);
             border-radius: 999px;
             padding: 10px 14px;
@@ -170,19 +178,45 @@
             .navbar {
                 align-items: flex-start;
                 flex-direction: column;
+                padding: 16px;
             }
 
             .controls {
-                justify-content: flex-start;
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                width: 100%;
+            }
+
+            .controls select {
+                grid-column: 1 / -1;
                 width: 100%;
             }
 
             .workspace {
                 grid-template-columns: 1fr;
+                gap: 12px;
+                padding: 12px;
             }
 
             .pane {
-                min-height: 45vh;
+                min-height: 42svh;
+                border-radius: 18px;
+            }
+
+            textarea,
+            pre {
+                padding: 14px;
+                font-size: 13px;
+            }
+        }
+
+        @media (max-width: 420px) {
+            .controls {
+                grid-template-columns: 1fr;
+            }
+
+            button {
+                width: 100%;
             }
         }
     </style>

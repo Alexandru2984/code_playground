@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+data
+sandbox
+snippets.db
+nimcache
+nimcache-*
+nimplayground
+tests/test_api
+nim_direct_test
+*.db
+*.sqlite
+*.sqlite3
+*.o
+*.so
+*.out

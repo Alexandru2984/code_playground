@@ -157,8 +157,13 @@ suite "Code Playground - Security & Execution Tests":
       "-H", "Content-Type: application/json",
       "--data", body
     ], options = {poUsePath, poStdErrToStdOut})
-    sleep(1200)
-    let (inspectOut, inspectCode) = execCmdEx("docker ps -q --filter name=nim_pg_ | xargs -r docker inspect --format '{{.HostConfig.Runtime}} {{.HostConfig.NetworkMode}} {{range .HostConfig.SecurityOpt}}{{.}} {{end}}'")
+    var inspectOut = ""
+    var inspectCode = 1
+    for _ in 0 ..< 20:
+      sleep(250)
+      (inspectOut, inspectCode) = execCmdEx("docker ps -q --filter name=nim_pg_ | xargs -r docker inspect --format '{{.HostConfig.Runtime}} {{.HostConfig.NetworkMode}} {{range .HostConfig.SecurityOpt}}{{.}} {{end}}'")
+      if inspectOut.contains("runsc"):
+        break
     check inspectCode == 0
     check inspectOut.contains("runsc")
     check inspectOut.contains("none")

@@ -1,10 +1,29 @@
+# Nim build outputs
 /bin/
 /nimcache/
-/sandbox/
-/data/
+/nimcache-*/
+/nimplayground
+/tests/test_api
+/nim_direct_test
 *.exe
 *.o
 *.so
 *.out
+
+# Runtime state
+/sandbox/
+/data/
+/snippets.db
+*.sqlite
+*.sqlite3
+*.db
+
+# Local environment
 .env
+.env.*
+
+# OS/editor noise
 .DS_Store
+*.swp
+*.swo
+*~

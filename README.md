@@ -86,3 +86,14 @@ docker ps -a --filter name=nim_pg_
 ```
 
 After changing `public/index.html`, recalculate the inline script/style hashes and update the Nginx CSP before reloading Nginx.
+
+## Configuration
+
+The service reads all configuration from environment variables. The `PORT` variable (default `8888`) must be provided by the environment — set it via systemd `EnvironmentFile=` or by exporting it before running locally:
+
+```sh
+export PORT=8888
+./nimplayground
+```
+
+The `.env` file at the repository root is loaded automatically by systemd via `EnvironmentFile=` in the unit file. It is **not** read by the application itself.

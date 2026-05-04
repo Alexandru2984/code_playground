@@ -1,4 +1,5 @@
 import prologue
+import std/asyncdispatch
 import json
 import osproc
 import os
@@ -6,6 +7,9 @@ import strutils
 import times
 import db_connector/db_sqlite
 import std/[locks, sequtils, sysrand]
+{.push warning[Deprecated]: off.}
+import std/threadpool
+{.pop.}
 
 const
   AllowedLanguages = [
@@ -41,6 +45,7 @@ var
   execLock: Lock
   activeExecutions: int
   dbLock: Lock
+  indexHtml: string
 
 initLock(execLock)
 initLock(dbLock)
@@ -61,10 +66,9 @@ proc initDb() =
           created_at INTEGER NOT NULL DEFAULT 0
         )
       """)
-      try:
+      let cols = db.getAllRows(sql"PRAGMA table_info(snippets)")
+      if not cols.anyIt(it[1] == "created_at"):
         db.exec(sql"ALTER TABLE snippets ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0")
-      except DbError:
-        discard
       db.exec(sql"DELETE FROM snippets WHERE created_at > 0 AND created_at < ?", epochTime().int - SnippetTtlDays * 24 * 60 * 60)
     finally:
       db.close()
@@ -91,7 +95,7 @@ proc sandboxUser(): string =
 proc sandboxRuntime(): string =
   getEnv("SANDBOX_RUNTIME", "runsc").strip()
 
-proc tryAcquireExecution(): bool =
+proc tryAcquireExecution(): bool {.gcsafe.} =
   acquire(execLock)
   if activeExecutions >= MaxConcurrentExecutions:
     release(execLock)
@@ -100,7 +104,7 @@ proc tryAcquireExecution(): bool =
   release(execLock)
   true
 
-proc releaseExecution() =
+proc releaseExecution() {.gcsafe.} =
   acquire(execLock)
   if activeExecutions > 0:
     dec activeExecutions
@@ -330,7 +334,7 @@ proc cleanupStaleSandboxes() =
       except CatchableError:
         echo "stale sandbox cleanup error: ", getCurrentExceptionMsg()
 
-proc executeCode(code, language: string): RunResult =
+proc executeCode(code, language: string): RunResult {.gcsafe.} =
   if code.len > MaxCodeBytes:
     result.output = "[Error] Code exceeds 64KB limit."
     result.exitCode = 2
@@ -377,6 +381,9 @@ proc executeCode(code, language: string): RunResult =
         echo "sandbox cleanup error: ", getCurrentExceptionMsg()
     releaseExecution()
 
+proc runCodeWorker(code, language: string): RunResult {.gcsafe.} =
+  executeCode(code, language)
+
 proc parsePayload(body: string; code, language: var string): bool =
   try:
     let bodyNode = parseJson(body)
@@ -387,7 +394,8 @@ proc parsePayload(body: string; code, language: var string): bool =
     result = false
 
 proc index(ctx: Context) {.async.} =
-  resp readFile("public/index.html")
+  {.cast(gcsafe).}:
+    resp indexHtml
 
 proc getSnippet(ctx: Context) {.async.} =
   let id = ctx.getPathParams("id")
@@ -450,28 +458,24 @@ proc runCode(ctx: Context) {.async.} =
     return
 
   try:
-    let result = executeCode(code, language)
-    if result.exitCode == 429:
-      resp jsonResponse(%*{"message": result.output}, Http429)
+    let fv = spawn runCodeWorker(code, language)
+    while not fv.isReady():
+      await sleepAsync(20)
+    let execResult = ^fv
+    if execResult.exitCode == 429:
+      resp jsonResponse(%*{"message": execResult.output}, Http429)
     else:
-      resp jsonResponse(%*{"output": result.output, "exitCode": result.exitCode})
+      resp jsonResponse(%*{"output": execResult.output, "exitCode": execResult.exitCode})
   except CatchableError:
     echo "runCode error: ", getCurrentExceptionMsg()
     resp jsonResponse(%*{"message": "Error processing request"}, Http500)
 
 proc readPort(): Port =
-  var portStr = getEnv("PORT", "8888")
-  try:
-    if fileExists(".env"):
-      for line in lines(".env"):
-        if line.startsWith("PORT="):
-          portStr = line.split("=", maxsplit = 1)[1].strip()
-  except CatchableError:
-    discard
-  portStr.parseInt().Port
+  getEnv("PORT", "8888").parseInt().Port
 
 cleanupStaleSandboxes()
 initDb()
+indexHtml = readFile("public/index.html")
 
 let settings = newSettings(address = "127.0.0.1", port = readPort(), debug = false)
 var app = newApp(settings = settings)

@@ -426,8 +426,8 @@ proc executeCode(code, language: string): RunResult {.gcsafe.} =
     createDir(execDir)
     let sourceFile = execDir / spec.fileName
     writeFile(sourceFile, code)
-    setFilePermissions(sourceFile, {fpUserRead})
-    setFilePermissions(execDir, {fpUserRead, fpUserExec})
+    setFilePermissions(sourceFile, {fpUserRead, fpGroupRead, fpOthersRead})
+    setFilePermissions(execDir, {fpUserRead, fpUserExec, fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
     let rawCmd = dockerCommand(spec, execDir, containerName)
     let command = "set -o pipefail; timeout -k 2s " & $spec.timeoutSeconds & "s " &

@@ -8,7 +8,7 @@ import strutils
 suite "Code Playground - Security & Execution Tests":
   setup:
     let client = newHttpClient()
-    let baseUrl = "http://127.0.0.1:8888"
+    let baseUrl = getEnv("BASE_URL", "http://127.0.0.1:8888")
 
   test "GET / returns HTML frontend":
     let res = client.request(baseUrl & "/", HttpGet)
@@ -16,10 +16,33 @@ suite "Code Playground - Security & Execution Tests":
     check res.body.contains("Code Playground")
     check res.body.contains("fetch('/run'")
     check not res.body.contains("new WebSocket")
+    check res.headers.hasKey("X-Content-Type-Options")
+    check res.headers["X-Content-Type-Options"] == "nosniff"
+    check res.headers.hasKey("Content-Security-Policy")
+
+  test "GET /healthz exposes sandbox readiness without secrets":
+    let res = client.request(baseUrl & "/healthz", HttpGet)
+    check res.code in {Http200, Http503}
+    let health = parseJson(res.body)
+    check health.hasKey("sandboxRuntime")
+    check health.hasKey("sandboxRuntimeReady")
+    check health.hasKey("maxConcurrentExecutions")
+    check not res.body.toLowerAscii().contains("secret")
+    check not res.body.toLowerAscii().contains("password")
 
   test "GET /ws/run is not exposed":
     let res = client.request(baseUrl & "/ws/run", HttpGet)
     check res.code == Http404
+
+  test "POST /run rejects non-JSON content type":
+    client.headers = newHttpHeaders({"Content-Type": "text/plain"})
+    let res = client.request(baseUrl & "/run", HttpPost, body = "print('nope')")
+    check res.code == Http415
+
+  test "POST /snippet rejects non-JSON content type":
+    client.headers = newHttpHeaders({"Content-Type": "text/plain"})
+    let res = client.request(baseUrl & "/snippet", HttpPost, body = "print('nope')")
+    check res.code == Http415
 
   test "POST /run executes basic Python code":
     let body = %*{
@@ -197,6 +220,10 @@ suite "Code Playground - Security & Execution Tests":
 
   test "GET /snippet/invalid returns 404":
     let getRes = client.request(baseUrl & "/snippet/" & "0".repeat(32), HttpGet)
+    check getRes.code == Http404
+
+  test "GET /snippet rejects non-hex ids":
+    let getRes = client.request(baseUrl & "/snippet/" & "z".repeat(32), HttpGet)
     check getRes.code == Http404
 
   test "POST /snippet rejects code over 64KB":

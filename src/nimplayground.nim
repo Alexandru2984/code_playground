@@ -5,6 +5,7 @@ import osproc
 import os
 import strutils
 import times
+import tables
 import db_connector/db_sqlite
 import std/[locks, sequtils, sysrand]
 {.push warning[Deprecated]: off.}
@@ -20,6 +21,8 @@ const
   MaxCodeBytes = 65536
   MaxOutputBytes = 65536
   MaxConcurrentExecutions = 2
+  RunRequestsPerMinute = 20
+  SnippetRequestsPerMinute = 20
   SnippetTtlDays = 30
   DataRoot = "data"
   DbPath = DataRoot / "snippets.db"
@@ -45,10 +48,13 @@ var
   execLock: Lock
   activeExecutions: int
   dbLock: Lock
+  rateLock: Lock
+  requestWindows: Table[string, seq[float]]
   indexHtml: string
 
 initLock(execLock)
 initLock(dbLock)
+initLock(rateLock)
 
 proc initDb() =
   acquire(dbLock)
@@ -86,6 +92,24 @@ proc randomHex(byteCount: int): string =
 proc isAllowedLanguage(language: string): bool =
   language in AllowedLanguages
 
+proc isHexId(id: string): bool =
+  result = id.len == 32
+  if not result:
+    return
+  for ch in id:
+    if ch notin {'0'..'9', 'a'..'f'}:
+      return false
+
+proc securityHeaders(includeCsp = false): ResponseHeaders =
+  result = initResponseHeaders({
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+  })
+  if includeCsp:
+    result["Content-Security-Policy"] = "default-src 'none'; script-src 'self' 'sha256-RBQtjXYSysu9fIYpWjdCcqXNYcws7Wtn+GDdXALHPoQ='; style-src 'self' 'sha256-yZxvIahRzi8LRJPcxaTr71iLxZAMJl6VWcBjhzwYEi4='; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
 
@@ -94,6 +118,46 @@ proc sandboxUser(): string =
 
 proc sandboxRuntime(): string =
   getEnv("SANDBOX_RUNTIME", "runsc").strip()
+
+proc sandboxRuntimeAvailable(): bool {.gcsafe.} =
+  let runtime = sandboxRuntime()
+  if runtime.len == 0:
+    return true
+  let (output, exitCode) = execCmdEx("docker info --format '{{json .Runtimes}}' 2>/dev/null")
+  exitCode == 0 and output.contains("\"" & runtime & "\"")
+
+proc clientIp(ctx: Context): string =
+  let headers = ctx.request.headers
+  if headers.hasKey("X-Real-IP"):
+    return headers["X-Real-IP", 0].strip()
+  if headers.hasKey("X-Forwarded-For"):
+    return headers["X-Forwarded-For", 0].split(',')[0].strip()
+  ctx.request.hostName()
+
+proc allowRequest(ctx: Context, bucket: string, limit: int): bool =
+  let now = epochTime()
+  let cutoff = now - 60.0
+  let key = bucket & ":" & clientIp(ctx)
+
+  acquire(rateLock)
+  try:
+    var window = requestWindows.getOrDefault(key, @[])
+    window = window.filterIt(it >= cutoff)
+    result = window.len < limit
+    if result:
+      window.add(now)
+    if window.len == 0:
+      requestWindows.del(key)
+    else:
+      requestWindows[key] = window
+  finally:
+    release(rateLock)
+
+proc wantsJson(ctx: Context): bool =
+  ctx.request.contentType().toLowerAscii().startsWith("application/json")
+
+proc errorResponse(message: string, code: HttpCode): Response =
+  jsonResponse(%*{"message": message}, code, headers = securityHeaders())
 
 proc tryAcquireExecution(): bool {.gcsafe.} =
   acquire(execLock)
@@ -345,6 +409,12 @@ proc executeCode(code, language: string): RunResult {.gcsafe.} =
     result.exitCode = 429
     return
 
+  if not sandboxRuntimeAvailable():
+    result.output = "[Error] Sandbox runtime is not available. Check SANDBOX_RUNTIME and Docker runtimes."
+    result.exitCode = 503
+    releaseExecution()
+    return
+
   let spec = getSpec(language)
   let token = randomHex(8)
   let execDir = absolutePath(SandboxRoot / ("nim_pg_" & token))
@@ -395,12 +465,24 @@ proc parsePayload(body: string; code, language: var string): bool =
 
 proc index(ctx: Context) {.async.} =
   {.cast(gcsafe).}:
-    resp indexHtml
+    resp htmlResponse(indexHtml, headers = securityHeaders(includeCsp = true))
+
+proc health(ctx: Context) {.async.} =
+  let runtime = sandboxRuntime()
+  let runtimeReady = sandboxRuntimeAvailable()
+  resp jsonResponse(%*{
+    "ok": runtimeReady,
+    "sandboxRuntime": runtime,
+    "sandboxRuntimeReady": runtimeReady,
+    "maxCodeBytes": MaxCodeBytes,
+    "maxOutputBytes": MaxOutputBytes,
+    "maxConcurrentExecutions": MaxConcurrentExecutions
+  }, if runtimeReady: Http200 else: Http503, headers = securityHeaders())
 
 proc getSnippet(ctx: Context) {.async.} =
   let id = ctx.getPathParams("id")
-  if id.len != 32:
-    resp jsonResponse(%*{"message": "Snippet not found"}, Http404)
+  if not isHexId(id):
+    resp errorResponse("Snippet not found", Http404)
     return
 
   acquire(dbLock)
@@ -410,21 +492,33 @@ proc getSnippet(ctx: Context) {.async.} =
       let cutoff = epochTime().int - SnippetTtlDays * 24 * 60 * 60
       let row = db.getRow(sql"SELECT code, language FROM snippets WHERE id = ? AND (created_at = 0 OR created_at >= ?)", id, cutoff)
       if row[0] == "":
-        resp jsonResponse(%*{"message": "Snippet not found"}, Http404)
+        resp errorResponse("Snippet not found", Http404)
       else:
-        resp jsonResponse(%*{"code": row[0], "language": row[1]})
+        resp jsonResponse(%*{"code": row[0], "language": row[1]}, headers = securityHeaders())
     finally:
       db.close()
   finally:
     release(dbLock)
 
 proc saveSnippet(ctx: Context) {.async.} =
+  if not wantsJson(ctx):
+    resp errorResponse("Content-Type must be application/json", Http415)
+    return
+  var allowed: bool
+  {.cast(gcsafe).}:
+    allowed = allowRequest(ctx, "snippet", SnippetRequestsPerMinute)
+  if not allowed:
+    var response = errorResponse("Too many snippet requests", Http429)
+    response.headers["Retry-After"] = "60"
+    resp response
+    return
+
   var code, language: string
   if not parsePayload(ctx.request.body, code, language):
-    resp jsonResponse(%*{"message": "Invalid request"}, Http400)
+    resp errorResponse("Invalid request", Http400)
     return
   if code.len > MaxCodeBytes:
-    resp jsonResponse(%*{"message": "Code exceeds 64KB limit"}, Http413)
+    resp errorResponse("Code exceeds 64KB limit", Http413)
     return
 
   acquire(dbLock)
@@ -435,26 +529,38 @@ proc saveSnippet(ctx: Context) {.async.} =
         let id = randomHex(16)
         try:
           db.exec(sql"INSERT INTO snippets (id, code, language, created_at) VALUES (?, ?, ?, ?)", id, code, language, epochTime().int)
-          resp jsonResponse(%*{"id": id})
+          resp jsonResponse(%*{"id": id}, headers = securityHeaders())
           return
         except DbError:
           if attempt == 4:
             raise
-      resp jsonResponse(%*{"message": "Error saving snippet"}, Http500)
+      resp errorResponse("Error saving snippet", Http500)
     finally:
       db.close()
   except CatchableError:
-    resp jsonResponse(%*{"message": "Error saving snippet"}, Http500)
+    resp errorResponse("Error saving snippet", Http500)
   finally:
     release(dbLock)
 
 proc runCode(ctx: Context) {.async.} =
+  if not wantsJson(ctx):
+    resp errorResponse("Content-Type must be application/json", Http415)
+    return
+  var allowed: bool
+  {.cast(gcsafe).}:
+    allowed = allowRequest(ctx, "run", RunRequestsPerMinute)
+  if not allowed:
+    var response = errorResponse("Too many execution requests", Http429)
+    response.headers["Retry-After"] = "60"
+    resp response
+    return
+
   var code, language: string
   if not parsePayload(ctx.request.body, code, language):
-    resp jsonResponse(%*{"message": "Invalid request"}, Http400)
+    resp errorResponse("Invalid request", Http400)
     return
   if code.len > MaxCodeBytes:
-    resp jsonResponse(%*{"message": "Code exceeds 64KB limit"}, Http413)
+    resp errorResponse("Code exceeds 64KB limit", Http413)
     return
 
   try:
@@ -463,12 +569,16 @@ proc runCode(ctx: Context) {.async.} =
       await sleepAsync(20)
     let execResult = ^fv
     if execResult.exitCode == 429:
-      resp jsonResponse(%*{"message": execResult.output}, Http429)
+      var response = errorResponse(execResult.output, Http429)
+      response.headers["Retry-After"] = "5"
+      resp response
+    elif execResult.exitCode == 503:
+      resp errorResponse(execResult.output, Http503)
     else:
-      resp jsonResponse(%*{"output": execResult.output, "exitCode": execResult.exitCode})
+      resp jsonResponse(%*{"output": execResult.output, "exitCode": execResult.exitCode}, headers = securityHeaders())
   except CatchableError:
     echo "runCode error: ", getCurrentExceptionMsg()
-    resp jsonResponse(%*{"message": "Error processing request"}, Http500)
+    resp errorResponse("Error processing request", Http500)
 
 proc readPort(): Port =
   getEnv("PORT", "8888").parseInt().Port
@@ -480,6 +590,7 @@ indexHtml = readFile("public/index.html")
 let settings = newSettings(address = "127.0.0.1", port = readPort(), debug = false)
 var app = newApp(settings = settings)
 app.addRoute("/", index, HttpGet)
+app.addRoute("/healthz", health, HttpGet)
 app.addRoute("/run", runCode, HttpPost)
 app.addRoute("/snippet", saveSnippet, HttpPost)
 app.addRoute("/snippet/{id}", getSnippet, HttpGet)

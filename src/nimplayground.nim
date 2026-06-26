@@ -437,7 +437,7 @@ proc executeCode(code, language: string): RunResult {.gcsafe.} =
     result.output = output
     result.exitCode = exitCode
 
-    if exitCode == 124 or exitCode == 137:
+    if exitCode in [124, 137] or (exitCode == 125 and output.len == 0):
       result.output &= "\n[Error] Execution timed out (limit: " & $spec.timeoutSeconds & "s)."
     elif output.len >= MaxOutputBytes:
       result.output &= "\n[Error] Output exceeded limit (64KB)."

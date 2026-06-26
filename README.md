@@ -142,6 +142,11 @@ proxy_hide_header Permissions-Policy;
 proxy_hide_header Content-Security-Policy;
 ```
 
+The HTTP-to-HTTPS redirect server should also set the same public security
+headers explicitly. Otherwise it inherits the generic `http {}` defaults from
+`/etc/nginx/nginx.conf`, which can produce different policies on port 80 than
+on the HTTPS vhost.
+
 After changing `public/index.html`, recalculate the inline script/style hashes and update the Nginx CSP before reloading Nginx.
 
 Before restarting production, smoke-test the new binary on a temporary port:

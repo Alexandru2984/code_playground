@@ -73,6 +73,23 @@ docker build -t cpp-drogon -f Dockerfile.cpp-drogon .
 docker build -t lua-playground -f Dockerfile.lua .
 ```
 
+Pre-pull official runtime images before production tests or deploys. Pulling
+during `/run` counts against each language timeout and can make the first user
+request fail even when the sandbox itself is healthy:
+
+```sh
+docker pull python:3.13-alpine
+docker pull node:24-alpine
+docker pull ruby:3.4-alpine
+docker pull php:8.4-cli-alpine
+docker pull perl:5.40-slim
+docker pull gcc:14
+docker pull rust:1-alpine
+docker pull golang:1.25-alpine
+docker pull eclipse-temurin:25-jdk-alpine
+docker pull nimlang/nim:2.2.4-alpine
+```
+
 ## Deployment Notes
 
 The current production service is managed by systemd as `nimplayground`.

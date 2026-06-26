@@ -130,6 +130,18 @@ The `runtimeArgs` entry forces gVisor networking off at the runtime layer. The
 application also passes Docker `--network none`; both controls should remain in
 place for public code execution.
 
+Nginx owns the public security headers. The app also sends the same headers for
+direct localhost smoke tests, so the proxied vhost should hide upstream copies
+before adding the canonical public values:
+
+```nginx
+proxy_hide_header X-Content-Type-Options;
+proxy_hide_header X-Frame-Options;
+proxy_hide_header Referrer-Policy;
+proxy_hide_header Permissions-Policy;
+proxy_hide_header Content-Security-Policy;
+```
+
 After changing `public/index.html`, recalculate the inline script/style hashes and update the Nginx CSP before reloading Nginx.
 
 Before restarting production, smoke-test the new binary on a temporary port:

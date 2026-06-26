@@ -85,7 +85,46 @@ journalctl -u nimplayground -n 100 --no-pager
 docker ps -a --filter name=nim_pg_
 ```
 
+The Docker daemon must expose a `runsc` runtime. On Ubuntu hosts with the
+`runsc` package installed, `/etc/docker/daemon.json` should keep the normal
+default runtime and add only the sandbox runtime:
+
+```json
+{
+  "ipv6": true,
+  "runtimes": {
+    "runsc": {
+      "path": "/usr/bin/runsc",
+      "runtimeArgs": ["--network=none"]
+    }
+  }
+}
+```
+
+Reload Docker after editing the daemon config:
+
+```sh
+sudo kill -SIGHUP "$(pidof dockerd)"
+docker info --format '{{json .Runtimes}}'
+docker run --rm --runtime runsc --network none --read-only alpine:latest /bin/true
+```
+
+The `runtimeArgs` entry forces gVisor networking off at the runtime layer. The
+application also passes Docker `--network none`; both controls should remain in
+place for public code execution.
+
 After changing `public/index.html`, recalculate the inline script/style hashes and update the Nginx CSP before reloading Nginx.
+
+Before restarting production, smoke-test the new binary on a temporary port:
+
+```sh
+nim c -d:release -d:websocketx src/nimplayground.nim
+PORT=8898 SANDBOX_RUNTIME=runsc ./src/nimplayground
+curl -sS http://127.0.0.1:8898/healthz
+curl -sS -X POST http://127.0.0.1:8898/run \
+  -H 'Content-Type: application/json' \
+  --data '{"code":"print(\"hello runsc\")","language":"python"}'
+```
 
 ## Configuration
 

@@ -3,6 +3,7 @@
 /nimcache/
 /nimcache-*/
 /nimplayground
+/nimplayground.bak.*
 /tests/test_api
 /nim_direct_test
 *.exe

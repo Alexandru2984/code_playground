@@ -353,7 +353,11 @@
                 });
                 const data = await response.json();
                 if (!response.ok) throw new Error(data.message || 'Execution failed');
-                setOutput(data.output, data.output.includes('[Error]'));
+                let text = data.output;
+                if (payload.language === 'java' && data.exitCode !== 0 && !/class\s+Snippet\b/.test(payload.code)) {
+                    text += '\n[Hint] The Java entry class must be named Snippet: public class Snippet { ... }';
+                }
+                setOutput(text, data.exitCode !== 0);
             } catch (err) {
                 setOutput(`Execution failed: ${err.message}`, true);
             } finally {

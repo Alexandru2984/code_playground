@@ -64,7 +64,7 @@ nimble build -d:release
 Run the API/security test suite against the local production listener:
 
 ```sh
-nim c -r -d:release -d:websocketx tests/test_api.nim
+nim c -r -d:release tests/test_api.nim
 ```
 
 Build local helper images:
@@ -132,16 +132,18 @@ The `runtimeArgs` entry forces gVisor networking off at the runtime layer. The
 application also passes Docker `--network none`; both controls should remain in
 place for public code execution.
 
-Nginx owns the public security headers. The app also sends the same headers for
-direct localhost smoke tests, so the proxied vhost should hide upstream copies
-before adding the canonical public values:
+The app owns the `Content-Security-Policy` header: it computes the inline
+script/style hashes from `public/index.html` at startup, so the CSP can never
+drift from the served page. The proxied vhost must let it through — do **not**
+hide or re-add `Content-Security-Policy` in Nginx. The remaining public
+security headers stay owned by Nginx, which hides the upstream copies the app
+sends for direct localhost smoke tests:
 
 ```nginx
 proxy_hide_header X-Content-Type-Options;
 proxy_hide_header X-Frame-Options;
 proxy_hide_header Referrer-Policy;
 proxy_hide_header Permissions-Policy;
-proxy_hide_header Content-Security-Policy;
 ```
 
 The HTTP-to-HTTPS redirect server should also set the same public security
@@ -149,12 +151,13 @@ headers explicitly. Otherwise it inherits the generic `http {}` defaults from
 `/etc/nginx/nginx.conf`, which can produce different policies on port 80 than
 on the HTTPS vhost.
 
-After changing `public/index.html`, recalculate the inline script/style hashes and update the Nginx CSP before reloading Nginx.
+After changing `public/index.html`, restart the service so it re-reads the
+file and recomputes the CSP hashes.
 
 Before restarting production, smoke-test the new binary on a temporary port:
 
 ```sh
-nim c -d:release -d:websocketx src/nimplayground.nim
+nim c -d:release src/nimplayground.nim
 PORT=8898 SANDBOX_RUNTIME=runsc ./src/nimplayground
 curl -sS http://127.0.0.1:8898/healthz
 curl -sS -X POST http://127.0.0.1:8898/run \

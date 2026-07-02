@@ -23,7 +23,11 @@ const
   MaxConcurrentExecutions = 2
   RunRequestsPerMinute = 20
   SnippetRequestsPerMinute = 20
+  SnippetReadRequestsPerMinute = 60
+  HealthRequestsPerMinute = 30
   SnippetTtlDays = 30
+  MaxStoredSnippets = 20000
+  SnippetPurgeIntervalSeconds = 3600
   DataRoot = "data"
   DbPath = DataRoot / "snippets.db"
   SandboxRoot = "sandbox"
@@ -50,6 +54,7 @@ var
   dbLock: Lock
   rateLock: Lock
   requestWindows: Table[string, seq[float]]
+  lastRateSweep: float
   indexHtml: string
 
 initLock(execLock)
@@ -60,8 +65,6 @@ proc initDb() =
   acquire(dbLock)
   try:
     createDir(DataRoot)
-    if fileExists("snippets.db") and not fileExists(DbPath):
-      copyFile("snippets.db", DbPath)
     let db = open(DbPath, "", "", "")
     try:
       db.exec(sql"""
@@ -127,11 +130,12 @@ proc sandboxRuntimeAvailable(): bool {.gcsafe.} =
   exitCode == 0 and output.contains("\"" & runtime & "\"")
 
 proc clientIp(ctx: Context): string =
+  # Trust only X-Real-IP: Nginx overwrites it on every proxied request,
+  # while X-Forwarded-For is client-controlled and would let callers pick
+  # their own rate-limit identity.
   let headers = ctx.request.headers
   if headers.hasKey("X-Real-IP"):
     return headers["X-Real-IP", 0].strip()
-  if headers.hasKey("X-Forwarded-For"):
-    return headers["X-Forwarded-For", 0].split(',')[0].strip()
   ctx.request.hostName()
 
 proc allowRequest(ctx: Context, bucket: string, limit: int): bool =
@@ -141,6 +145,15 @@ proc allowRequest(ctx: Context, bucket: string, limit: int): bool =
 
   acquire(rateLock)
   try:
+    if now - lastRateSweep >= 60.0:
+      lastRateSweep = now
+      var stale: seq[string]
+      for existing, window in requestWindows:
+        if not window.anyIt(it >= cutoff):
+          stale.add(existing)
+      for existing in stale:
+        requestWindows.del(existing)
+
     var window = requestWindows.getOrDefault(key, @[])
     window = window.filterIt(it >= cutoff)
     result = window.len < limit
@@ -468,6 +481,15 @@ proc index(ctx: Context) {.async.} =
     resp htmlResponse(indexHtml, headers = securityHeaders(includeCsp = true))
 
 proc health(ctx: Context) {.async.} =
+  var allowed: bool
+  {.cast(gcsafe).}:
+    allowed = allowRequest(ctx, "health", HealthRequestsPerMinute)
+  if not allowed:
+    var response = errorResponse("Too many health requests", Http429)
+    response.headers["Retry-After"] = "60"
+    resp response
+    return
+
   let runtime = sandboxRuntime()
   let runtimeReady = sandboxRuntimeAvailable()
   resp jsonResponse(%*{
@@ -480,6 +502,15 @@ proc health(ctx: Context) {.async.} =
   }, if runtimeReady: Http200 else: Http503, headers = securityHeaders())
 
 proc getSnippet(ctx: Context) {.async.} =
+  var allowed: bool
+  {.cast(gcsafe).}:
+    allowed = allowRequest(ctx, "snippet-read", SnippetReadRequestsPerMinute)
+  if not allowed:
+    var response = errorResponse("Too many snippet requests", Http429)
+    response.headers["Retry-After"] = "60"
+    resp response
+    return
+
   let id = ctx.getPathParams("id")
   if not isHexId(id):
     resp errorResponse("Snippet not found", Http404)
@@ -525,6 +556,10 @@ proc saveSnippet(ctx: Context) {.async.} =
   try:
     let db = open(DbPath, "", "", "")
     try:
+      let stored = db.getValue(sql"SELECT COUNT(*) FROM snippets")
+      if stored.len > 0 and stored.parseInt() >= MaxStoredSnippets:
+        resp errorResponse("Snippet storage is full. Try again later.", Http503)
+        return
       for attempt in 0 ..< 5:
         let id = randomHex(16)
         try:
@@ -541,6 +576,26 @@ proc saveSnippet(ctx: Context) {.async.} =
     resp errorResponse("Error saving snippet", Http500)
   finally:
     release(dbLock)
+
+proc purgeExpiredSnippets() {.gcsafe.} =
+  {.cast(gcsafe).}:
+    acquire(dbLock)
+    try:
+      let db = open(DbPath, "", "", "")
+      try:
+        db.exec(sql"DELETE FROM snippets WHERE created_at > 0 AND created_at < ?", epochTime().int - SnippetTtlDays * 24 * 60 * 60)
+      finally:
+        db.close()
+    finally:
+      release(dbLock)
+
+proc maintenanceLoop() {.async.} =
+  while true:
+    await sleepAsync(SnippetPurgeIntervalSeconds * 1000)
+    try:
+      purgeExpiredSnippets()
+    except CatchableError:
+      echo "snippet purge error: ", getCurrentExceptionMsg()
 
 proc runCode(ctx: Context) {.async.} =
   if not wantsJson(ctx):
@@ -594,4 +649,5 @@ app.addRoute("/healthz", health, HttpGet)
 app.addRoute("/run", runCode, HttpPost)
 app.addRoute("/snippet", saveSnippet, HttpPost)
 app.addRoute("/snippet/{id}", getSnippet, HttpGet)
+asyncCheck maintenanceLoop()
 app.run()

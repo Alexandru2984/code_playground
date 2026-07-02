@@ -38,6 +38,8 @@ Each run uses a fresh `nim_pg_*` container with:
 
 The web process itself binds to `127.0.0.1` and is intended to be exposed through Nginx/Cloudflare only. On this VPS, Nginx also enforces request limits, security headers, CSP, HSTS, and origin-guard checks for Cloudflare traffic.
 
+Rate limiting is keyed to the `X-Real-IP` header only. Nginx must set `proxy_set_header X-Real-IP $remote_addr;` on the proxied location (combined with Cloudflare `set_real_ip_from` rules so `$remote_addr` is the real client address). Client-supplied `X-Forwarded-For` is deliberately ignored. All endpoints are rate limited, snippet storage is capped at 20k rows, and expired snippets are purged hourly.
+
 Known limitation: the service still needs Docker access through the dedicated `nimplayground` system user. For stronger isolation, split execution into a separate runner VM/VPS or a minimal local runner process that owns Docker access.
 
 ## Runtime State
@@ -49,7 +51,7 @@ Runtime files are intentionally ignored by Git:
 - local build binaries
 - local `.env` files
 
-Legacy `snippets.db` at the repository root should not be used by the running service; production uses `data/snippets.db`.
+The service only reads and writes `data/snippets.db`; a legacy `snippets.db` at the repository root is ignored and can be deleted.
 
 ## Development
 

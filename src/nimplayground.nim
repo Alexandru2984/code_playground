@@ -7,8 +7,9 @@ import strutils
 import times
 import tables
 import db_connector/db_sqlite
-import std/[locks, sequtils, sysrand]
+import std/[locks, sequtils, sysrand, base64]
 import taskpools
+import nimcrypto/[hash, sha2]
 
 const
   AllowedLanguages = [
@@ -62,6 +63,7 @@ var
   requestWindows: Table[string, seq[float]]
   lastRateSweep: float
   indexHtml: string
+  cspHeader: string
   execPool: Taskpool
   runtimeStatusLock: Lock
   runtimeCheckedAt: float
@@ -114,6 +116,29 @@ proc isHexId(id: string): bool =
     if ch notin {'0'..'9', 'a'..'f'}:
       return false
 
+proc inlineContentHash(html, tag: string): string =
+  # CSP hash for the first inline <script>/<style> block, matching what the
+  # browser hashes: the exact bytes between the tags.
+  let openIdx = html.find("<" & tag)
+  if openIdx < 0:
+    return ""
+  let contentStart = html.find('>', openIdx)
+  if contentStart < 0:
+    return ""
+  let closeIdx = html.find("</" & tag & ">", contentStart)
+  if closeIdx < 0:
+    return ""
+  let content = html[contentStart + 1 ..< closeIdx]
+  "'sha256-" & base64.encode(sha256.digest(content).data) & "'"
+
+proc buildCsp(html: string): string =
+  let scriptHash = inlineContentHash(html, "script")
+  let styleHash = inlineContentHash(html, "style")
+  result = "default-src 'none'"
+  result &= "; script-src 'self'" & (if scriptHash.len > 0: " " & scriptHash else: "")
+  result &= "; style-src 'self'" & (if styleHash.len > 0: " " & styleHash else: "")
+  result &= "; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+
 proc securityHeaders(includeCsp = false): ResponseHeaders =
   result = initResponseHeaders({
     "X-Content-Type-Options": "nosniff",
@@ -122,7 +147,8 @@ proc securityHeaders(includeCsp = false): ResponseHeaders =
     "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
   })
   if includeCsp:
-    result["Content-Security-Policy"] = "default-src 'none'; script-src 'self' 'sha256-RBQtjXYSysu9fIYpWjdCcqXNYcws7Wtn+GDdXALHPoQ='; style-src 'self' 'sha256-yZxvIahRzi8LRJPcxaTr71iLxZAMJl6VWcBjhzwYEi4='; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'"
+    {.cast(gcsafe).}:
+      result["Content-Security-Policy"] = cspHeader
 
 proc shellQuote(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -704,6 +730,7 @@ proc readPort(): Port =
 cleanupStaleSandboxes()
 initDb()
 indexHtml = readFile("public/index.html")
+cspHeader = buildCsp(indexHtml)
 execPool = Taskpool.new(numThreads = MaxConcurrentExecutions + 2)
 
 let settings = newSettings(address = "127.0.0.1", port = readPort(), debug = false)

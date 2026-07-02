@@ -8,9 +8,7 @@ import times
 import tables
 import db_connector/db_sqlite
 import std/[locks, sequtils, sysrand]
-{.push warning[Deprecated]: off.}
-import std/threadpool
-{.pop.}
+import taskpools
 
 const
   AllowedLanguages = [
@@ -28,6 +26,7 @@ const
   SnippetTtlDays = 30
   MaxStoredSnippets = 20000
   SnippetPurgeIntervalSeconds = 3600
+  RuntimeCheckCacheSeconds = 10.0
   DataRoot = "data"
   DbPath = DataRoot / "snippets.db"
   SandboxRoot = "sandbox"
@@ -48,6 +47,13 @@ type
     output: string
     exitCode: int
 
+  # Fixed-size mirror of RunResult: taskpools Flowvars only carry types that
+  # support copyMem, so results cross threads in this buffer.
+  RunResultMsg = object
+    exitCode: int32
+    outputLen: int32
+    output: array[MaxOutputBytes + 512, char]
+
 var
   execLock: Lock
   activeExecutions: int
@@ -56,10 +62,15 @@ var
   requestWindows: Table[string, seq[float]]
   lastRateSweep: float
   indexHtml: string
+  execPool: Taskpool
+  runtimeStatusLock: Lock
+  runtimeCheckedAt: float
+  runtimeStatusOk: bool
 
 initLock(execLock)
 initLock(dbLock)
 initLock(rateLock)
+initLock(runtimeStatusLock)
 
 proc initDb() =
   acquire(dbLock)
@@ -122,12 +133,30 @@ proc sandboxUser(): string =
 proc sandboxRuntime(): string =
   getEnv("SANDBOX_RUNTIME", "runsc").strip()
 
-proc sandboxRuntimeAvailable(): bool {.gcsafe.} =
+proc probeSandboxRuntime(): bool =
   let runtime = sandboxRuntime()
   if runtime.len == 0:
     return true
   let (output, exitCode) = execCmdEx("docker info --format '{{json .Runtimes}}' 2>/dev/null")
   exitCode == 0 and output.contains("\"" & runtime & "\"")
+
+proc sandboxRuntimeAvailable(): bool {.gcsafe.} =
+  # Probing shells out to the Docker CLI, so cache the result briefly to keep
+  # /healthz and per-run checks from blocking the event loop.
+  {.cast(gcsafe).}:
+    acquire(runtimeStatusLock)
+    if epochTime() - runtimeCheckedAt < RuntimeCheckCacheSeconds:
+      result = runtimeStatusOk
+      release(runtimeStatusLock)
+      return
+    release(runtimeStatusLock)
+
+    let ok = probeSandboxRuntime()
+    acquire(runtimeStatusLock)
+    runtimeStatusOk = ok
+    runtimeCheckedAt = epochTime()
+    release(runtimeStatusLock)
+    result = ok
 
 proc clientIp(ctx: Context): string =
   # Trust only X-Real-IP: Nginx overwrites it on every proxied request,
@@ -446,12 +475,20 @@ proc executeCode(code, language: string): RunResult {.gcsafe.} =
     let command = "set -o pipefail; timeout -k 2s " & $spec.timeoutSeconds & "s " &
       rawCmd & " 2>&1 | head -c " & $MaxOutputBytes
 
+    let startedAt = epochTime()
     let (output, exitCode) = execCmdEx("bash -c " & shellQuote(command) & " 2>/dev/null")
+    let elapsed = epochTime() - startedAt
     result.output = output
     result.exitCode = exitCode
 
-    if exitCode in [124, 137] or (exitCode == 125 and output.len == 0):
+    # 137 (SIGKILL) can mean either the timeout escalation or the cgroup OOM
+    # killer; the container is already gone (--rm), so use elapsed time to
+    # tell them apart.
+    if exitCode == 124 or (exitCode == 125 and output.len == 0) or
+        (exitCode == 137 and elapsed >= spec.timeoutSeconds.float - 0.5):
       result.output &= "\n[Error] Execution timed out (limit: " & $spec.timeoutSeconds & "s)."
+    elif exitCode == 137:
+      result.output &= "\n[Error] Execution was killed, most likely out of memory (limit: " & spec.memory & ")."
     elif output.len >= MaxOutputBytes:
       result.output &= "\n[Error] Output exceeded limit (64KB)."
   finally:
@@ -464,8 +501,24 @@ proc executeCode(code, language: string): RunResult {.gcsafe.} =
         echo "sandbox cleanup error: ", getCurrentExceptionMsg()
     releaseExecution()
 
-proc runCodeWorker(code, language: string): RunResult {.gcsafe.} =
-  executeCode(code, language)
+proc toMsg(r: RunResult): RunResultMsg =
+  result.exitCode = r.exitCode.int32
+  let n = min(r.output.len, result.output.len)
+  result.outputLen = n.int32
+  if n > 0:
+    copyMem(addr result.output[0], unsafeAddr r.output[0], n)
+
+proc toRunResult(m: RunResultMsg): RunResult =
+  result.exitCode = m.exitCode.int
+  result.output = newString(m.outputLen)
+  if m.outputLen > 0:
+    copyMem(addr result.output[0], unsafeAddr m.output[0], m.outputLen)
+
+proc runCodeWorker(code, language: string): RunResultMsg {.gcsafe, raises: [].} =
+  try:
+    result = toMsg(executeCode(code, language))
+  except CatchableError:
+    result = toMsg(RunResult(output: "[Error] Internal execution failure.", exitCode: 1))
 
 proc parsePayload(body: string; code, language: var string): bool =
   try:
@@ -619,10 +672,12 @@ proc runCode(ctx: Context) {.async.} =
     return
 
   try:
-    let fv = spawn runCodeWorker(code, language)
+    var fv: Flowvar[RunResultMsg]
+    {.cast(gcsafe).}:
+      fv = execPool.spawn runCodeWorker(code, language)
     while not fv.isReady():
       await sleepAsync(20)
-    let execResult = ^fv
+    let execResult = toRunResult(sync(fv))
     if execResult.exitCode == 429:
       var response = errorResponse(execResult.output, Http429)
       response.headers["Retry-After"] = "5"
@@ -636,11 +691,20 @@ proc runCode(ctx: Context) {.async.} =
     resp errorResponse("Error processing request", Http500)
 
 proc readPort(): Port =
-  getEnv("PORT", "8888").parseInt().Port
+  let raw = getEnv("PORT", "8888")
+  var value: int
+  try:
+    value = raw.parseInt()
+  except ValueError:
+    quit("Invalid PORT value: " & raw, 1)
+  if value < 1 or value > 65535:
+    quit("PORT out of range: " & raw, 1)
+  Port(value)
 
 cleanupStaleSandboxes()
 initDb()
 indexHtml = readFile("public/index.html")
+execPool = Taskpool.new(numThreads = MaxConcurrentExecutions + 2)
 
 let settings = newSettings(address = "127.0.0.1", port = readPort(), debug = false)
 var app = newApp(settings = settings)
